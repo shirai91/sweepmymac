@@ -4,36 +4,28 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
-	<key>CFBundleName</key>
-	<string>Sweep</string>
 	<key>CFBundleDisplayName</key>
 	<string>Sweep</string>
-	<key>CFBundleIdentifier</key>
-	<string>com.tungpham.sweep</string>
 	<key>CFBundleExecutable</key>
 	<string>Sweep</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.tungpham.sweep</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Sweep</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
+	<string>0.0.1</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
-	<key>LSMinimumSystemVersion</key>
-	<string>15.0</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
-	<key>NSHighResolutionCapable</key>
-	<true/>
-	<key>NSHumanReadableCopyright</key>
-	<string>Copyright © 2026 Tung Pham. All rights reserved.</string>
-	<key>NSPrincipalClass</key>
-	<string>NSApplication</string>
-	<key>NSSupportsAutomaticGraphicsSwitching</key>
-	<true/>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Sweep asks Finder to empty the Trash when you choose to.</string>
 	<key>NSDesktopFolderUsageDescription</key>
@@ -42,9 +34,17 @@
 	<string>Sweep scans this folder to find junk files.</string>
 	<key>NSDownloadsFolderUsageDescription</key>
 	<string>Sweep scans this folder to find junk files.</string>
-	<key>NSRemovableVolumesUsageDescription</key>
-	<string>Sweep scans this volume to find junk files.</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 Tung Pham. All rights reserved.</string>
 	<key>NSNetworkVolumesUsageDescription</key>
 	<string>Sweep scans this volume to find junk files.</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>Sweep scans this volume to find junk files.</string>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
 </dict>
 </plist>
