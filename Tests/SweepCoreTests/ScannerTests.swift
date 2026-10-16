@@ -33,6 +33,16 @@ final class ScannerTests: XCTestCase {
         return ParallelWalker(configuration: configuration, cancel: CancelFlag()).run(workerCount: 4)
     }
 
+    private func cleanPermanently(_ items: [CleanupItem]) async -> CleanReport {
+        let staging = BackgroundDeleter(stagingRoot: root + "/.staging")
+        var cleaner = Cleaner(mode: .deletePermanently)
+        cleaner.backgroundDeleter = staging
+        let report = await cleaner.clean(items) { _ in }
+        await staging.waitUntilIdle()
+        XCTAssertEqual((try? FileManager.default.contentsOfDirectory(atPath: root + "/.staging")) ?? [], [])
+        return report
+    }
+
     func testBulkReaderMatchesFileManager() throws {
         try write("a.bin", bytes: 10_000)
         try write("b.bin", bytes: 200_000)
@@ -172,7 +182,7 @@ final class ScannerTests: XCTestCase {
         try write("junk/a/b.bin", bytes: 1000)
         try write("junk/c.bin", bytes: 1000)
         let item = CleanupItem(id: "t", category: .appCaches, title: "t", detail: "", path: nil, size: 2000, safety: .safe, recommended: true, action: .removePaths([root + "/junk/a", root + "/junk/c.bin", root + "/junk/missing"]))
-        let report = await Cleaner(mode: .deletePermanently).clean([item]) { _ in }
+        let report = await cleanPermanently([item])
         XCTAssertEqual(report.cleanedItemIDs, ["t"])
         XCTAssertEqual(report.bytesFreed, 2000)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root + "/junk/a"))
@@ -184,7 +194,7 @@ final class ScannerTests: XCTestCase {
         chmod(root + "/gomod/pkg/mod/x/file.go", 0o444)
         chmod(root + "/gomod/pkg/mod/x", 0o555)
         let item = CleanupItem(id: "go", category: .devCaches, title: "go", detail: "", path: root + "/gomod/pkg/mod", size: 100, safety: .review, recommended: false, action: .removePaths([root + "/gomod/pkg/mod"]))
-        let report = await Cleaner(mode: .deletePermanently).clean([item]) { _ in }
+        let report = await cleanPermanently([item])
         XCTAssertTrue(report.failures.isEmpty, "\(report.failures.map(\.reason))")
         XCTAssertFalse(FileManager.default.fileExists(atPath: root + "/gomod/pkg/mod"))
     }
@@ -197,7 +207,7 @@ final class ScannerTests: XCTestCase {
         try FileManager.default.createSymbolicLink(atPath: root + "/cache/locked/link", withDestinationPath: root + "/outside")
         chmod(root + "/cache/locked", 0o555)
         let item = CleanupItem(id: "c", category: .appCaches, title: "c", detail: "", path: root + "/cache", size: 10, safety: .safe, recommended: true, action: .removePaths([root + "/cache"]))
-        let report = await Cleaner(mode: .deletePermanently).clean([item]) { _ in }
+        let report = await cleanPermanently([item])
         XCTAssertTrue(report.failures.isEmpty, "\(report.failures.map(\.reason))")
         XCTAssertFalse(FileManager.default.fileExists(atPath: root + "/cache"))
         let outside = try FileManager.default.attributesOfItem(atPath: root + "/outside")
@@ -220,7 +230,7 @@ final class ScannerTests: XCTestCase {
 
     func testCleanerRefusesProtectedPath() async {
         let item = CleanupItem(id: "bad", category: .appCaches, title: "bad", detail: "", path: "/Applications", size: 1, safety: .safe, recommended: true, action: .removePaths(["/Applications"]))
-        let report = await Cleaner(mode: .deletePermanently).clean([item]) { _ in }
+        let report = await cleanPermanently([item])
         XCTAssertEqual(report.failures.count, 1)
         XCTAssertTrue(FileManager.default.fileExists(atPath: "/Applications"))
     }

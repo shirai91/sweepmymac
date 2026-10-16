@@ -248,4 +248,5 @@ public struct CleanReport: Sendable {
     public let cleanedItemIDs: Set<String>
     public let failures: [CleanFailure]
     public let movedToTrash: Bool
+    public let trashedPaths: [String]
 }

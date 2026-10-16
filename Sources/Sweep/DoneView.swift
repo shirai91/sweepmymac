@@ -26,7 +26,7 @@ struct DoneView: View {
                             .font(.title3)
                             .foregroundStyle(.secondary)
                     }
-                    if outcome.movedToTrash {
+                    if outcome.movedToTrash && !outcome.trashedPaths.isEmpty {
                         TrashHint(state: trashState) { isConfirmingEmptyTrash = true }
                             .frame(maxWidth: 560)
                     }
@@ -50,10 +50,10 @@ struct DoneView: View {
                 .padding(40)
                 .frame(maxWidth: .infinity)
             }
-            .confirmationDialog("Empty the Trash?", isPresented: $isConfirmingEmptyTrash) {
-                Button("Empty Trash", role: .destructive, action: emptyTrash)
+            .confirmationDialog("Delete these items from the Trash?", isPresented: $isConfirmingEmptyTrash) {
+                Button("Delete from Trash", role: .destructive) { emptyTrash(outcome.trashedPaths) }
             } message: {
-                Text("Everything in the Trash is deleted permanently, including items you put there yourself. This cannot be undone.")
+                Text("Sweep deletes only the \(CountFormat.items(outcome.trashedPaths.count)) it moved to the Trash. Other items in your Trash stay. This cannot be undone.")
             }
         } else {
             ContentUnavailableView("Nothing was cleaned", systemImage: "tray")
@@ -66,32 +66,20 @@ struct DoneView: View {
         return "\(cleaned) cleaned, \(outcome.failures.count) could not be removed."
     }
 
-    private func emptyTrash() {
+    private func emptyTrash(_ paths: [String]) {
         trashState = .emptying
         Task {
-            let succeeded = await TrashEmptier.empty()
-            trashState = succeeded ? .emptied : .failed
-            model.refreshFullDiskAccess()
+            let result = await model.deleteTrashedItems(paths)
+            trashState = result.succeeded ? .emptied : .failed(result.firstError ?? "Some items could not be deleted.")
         }
     }
 }
 
-enum TrashState {
+enum TrashState: Equatable {
     case idle
     case emptying
     case emptied
-    case failed
-}
-
-enum TrashEmptier {
-    @MainActor
-    static func empty() async -> Bool {
-        await Task.yield()
-        let script = NSAppleScript(source: "tell application \"Finder\" to empty trash")
-        var error: NSDictionary?
-        script?.executeAndReturnError(&error)
-        return error == nil
-    }
+    case failed(String)
 }
 
 struct TrashHint: View {
@@ -116,7 +104,7 @@ struct TrashHint: View {
                 Button(action: emptyTrash) {
                     HStack(spacing: 6) {
                         if state == .emptying { ProgressView().controlSize(.small) }
-                        Text("Empty Trash")
+                        Text("Delete from Trash")
                     }
                 }
                 .controlSize(.large)
@@ -128,17 +116,17 @@ struct TrashHint: View {
 
     private var title: String {
         switch state {
-        case .emptied: "Trash emptied"
-        case .failed: "Couldn't empty the Trash"
+        case .emptied: "Deleted from the Trash"
+        case .failed: "Some items are still in the Trash"
         default: "Items are in the Trash"
         }
     }
 
     private var message: String {
         switch state {
-        case .emptied: "The space is free now."
-        case .failed: "Allow Sweep to control Finder in System Settings › Privacy & Security › Automation, then try again."
-        default: "Empty it to free the space. Until then you can put anything back."
+        case .emptied: "Sweep frees the space in the background. Your other Trash items are untouched."
+        case .failed(let reason): reason
+        default: "Delete them to free the space. Until then you can put anything back."
         }
     }
 }

@@ -21,6 +21,18 @@ public final class SweepEngine: @unchecked Sendable {
         }.value
     }
 
+    public func emptyTrash(_ trashedPaths: [String]) async -> DeletionResult {
+        await Task.detached(priority: .userInitiated) {
+            Cleaner(mode: .deletePermanently).emptyTrash(trashedPaths)
+        }.value
+    }
+
+    public static var backgroundDeletion: BackgroundDeleter { BackgroundDeleter.shared }
+
+    public static func resumePendingDeletions() {
+        BackgroundDeleter.shared.resumePendingDeletions()
+    }
+
     public static func hasFullDiskAccess() -> Bool {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let probes = [

@@ -137,7 +137,12 @@ struct SidebarDiskMeter: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
+            if !model.backgroundDeletion.isIdle {
+                BackgroundDeletionLine(status: model.backgroundDeletion)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+            }
         }
+        .animation(.smooth, value: model.backgroundDeletion.isIdle)
         .padding(12)
         .background {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -173,5 +178,26 @@ struct DiskBar: View {
         .frame(height: height)
         .animation(.smooth(duration: 0.6), value: junk)
         .animation(.smooth(duration: 0.6), value: used)
+    }
+}
+
+struct BackgroundDeletionLine: View {
+    let status: BackgroundDeletionStatus
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ProgressView()
+                .controlSize(.mini)
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .contentTransition(.numericText())
+        }
+        .help("Sweep deletes cleaned items in the background. If you quit, it finishes the next time it opens.")
+    }
+
+    private var label: String {
+        status.pendingBytes > 0 ? "Freeing \(ByteFormat.string(status.pendingBytes))…" : "Freeing space…"
     }
 }

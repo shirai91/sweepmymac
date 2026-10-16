@@ -3,6 +3,8 @@ import Foundation
 struct Cleaner {
     let mode: DeleteMode
     var docker = DockerService()
+    var backgroundDeleter = BackgroundDeleter.shared
+    var fastDeleter = FastDeleter()
     var maximumParallelItems = 4
 
     func clean(_ items: [CleanupItem], progress: @escaping @Sendable (CleanProgress) -> Void) async -> CleanReport {
@@ -13,8 +15,8 @@ struct Cleaner {
             func scheduleNext() -> Bool {
                 guard let item = iterator.next() else { return false }
                 group.addTask {
-                    let outcome = await perform(item)
-                    progress(tally.record(item, outcome: outcome))
+                    let result = await perform(item)
+                    progress(tally.record(item, result: result))
                 }
                 return true
             }
@@ -26,65 +28,91 @@ struct Cleaner {
         return tally.report(movedToTrash: mode == .moveToTrash)
     }
 
-    func perform(_ item: CleanupItem) async -> CleanOutcome {
+    func perform(_ item: CleanupItem) async -> ItemCleanResult {
         switch item.action {
         case .removePaths(let paths):
-            return removeAll(paths, permanently: mode == .deletePermanently)
+            return removeAll(paths, totalBytes: item.size, permanently: mode == .deletePermanently)
         case .emptyTrash(let paths):
-            return removeAll(paths, permanently: true)
+            return removeAll(paths, totalBytes: item.size, permanently: true)
         case .docker(let action):
             do {
                 try await docker.perform(action)
-                return .success
+                return ItemCleanResult(outcome: .success)
             } catch {
-                return .failure(error.localizedDescription)
+                return ItemCleanResult(outcome: .failure(error.localizedDescription))
             }
         case .deleteUnavailableSimulators:
             guard let output = ProcessRunner.run("/usr/bin/xcrun", ["simctl", "delete", "unavailable"], timeout: 300) else {
-                return .failure("xcrun simctl did not respond")
+                return ItemCleanResult(outcome: .failure("xcrun simctl did not respond"))
             }
-            return output.status == 0 ? .success : .failure(output.errorText)
+            return ItemCleanResult(outcome: output.status == 0 ? .success : .failure(output.errorText))
         }
     }
 
-    private func removeAll(_ paths: [String], permanently: Bool) -> CleanOutcome {
-        var failures: [String] = []
-        var failedCount = 0
+    func emptyTrash(_ paths: [String]) -> DeletionResult {
+        var failures = 0
+        var firstError: String?
         for path in paths {
-            if let reason = remove(path, permanently: permanently) {
-                failedCount += 1
-                if failures.count < 3 { failures.append(reason) }
+            guard TrashLocation.contains(path) else {
+                failures += 1
+                firstError = firstError ?? "\((path as NSString).lastPathComponent) is not in the Trash"
+                continue
+            }
+            if case .failed(let reason) = deletePermanently(path, bytes: 0) {
+                failures += 1
+                firstError = firstError ?? reason
             }
         }
-        if failedCount == 0 { return .success }
-        let summary = failedCount == paths.count ? failures.joined(separator: "\n") : "\(failedCount) of \(paths.count) could not be removed. " + failures.joined(separator: "\n")
-        return failedCount == paths.count ? .failure(summary) : .partial(summary, fractionRemoved: Double(paths.count - failedCount) / Double(paths.count))
+        return DeletionResult(failedEntries: failures, firstError: firstError)
     }
 
-    private func remove(_ path: String, permanently: Bool) -> String? {
-        guard !PathGuard.isProtected(path) else { return "Sweep never removes \(path)" }
+    private func removeAll(_ paths: [String], totalBytes: Int64, permanently: Bool) -> ItemCleanResult {
+        let bytesPerPath = paths.isEmpty ? 0 : totalBytes / Int64(paths.count)
+        var reasons: [String] = []
+        var failedCount = 0
+        var trashedPaths: [String] = []
+        for path in paths {
+            switch remove(path, bytes: bytesPerPath, permanently: permanently) {
+            case .removed:
+                continue
+            case .trashed(let location):
+                trashedPaths.append(location)
+            case .failed(let reason):
+                failedCount += 1
+                if reasons.count < 3 { reasons.append(reason) }
+            }
+        }
+        guard failedCount > 0 else { return ItemCleanResult(outcome: .success, trashedPaths: trashedPaths) }
+        let summary = reasons.joined(separator: "\n")
+        if failedCount == paths.count {
+            return ItemCleanResult(outcome: .failure(summary), trashedPaths: trashedPaths)
+        }
+        let removedFraction = Double(paths.count - failedCount) / Double(paths.count)
+        return ItemCleanResult(outcome: .partial("\(failedCount) of \(paths.count) could not be removed. " + summary, fractionRemoved: removedFraction), trashedPaths: trashedPaths)
+    }
+
+    private func remove(_ path: String, bytes: Int64, permanently: Bool) -> RemovalResult {
+        guard !PathGuard.isProtected(path) else { return .failed("Sweep never removes \(path)") }
         var info = stat()
-        guard lstat(path, &info) == 0 else { return errno == ENOENT ? nil : String(cString: strerror(errno)) }
-        let url = URL(fileURLWithPath: path)
-        let manager = FileManager.default
+        guard lstat(path, &info) == 0 else {
+            return errno == ENOENT ? .removed : .failed(FastDeleter.describe(errno, path))
+        }
+        return permanently ? deletePermanently(path, bytes: bytes) : moveToTrash(path)
+    }
+
+    private func deletePermanently(_ path: String, bytes: Int64) -> RemovalResult {
+        if backgroundDeleter.stage(path, bytes: bytes) == .staged { return .removed }
+        let result = fastDeleter.delete(path)
+        return result.succeeded ? .removed : .failed(result.firstError ?? "\((path as NSString).lastPathComponent) could not be removed")
+    }
+
+    private func moveToTrash(_ path: String) -> RemovalResult {
+        var location: NSURL?
         do {
-            if permanently {
-                try manager.removeItem(at: url)
-            } else {
-                try manager.trashItem(at: url, resultingItemURL: nil)
-            }
-            return nil
+            try FileManager.default.trashItem(at: URL(fileURLWithPath: path), resultingItemURL: &location)
+            return location?.path.map(RemovalResult.trashed) ?? .removed
         } catch {
-            guard permanently else { return Self.describe(error, path: path) }
-            let changes = Self.grantOwnerAccess(to: path)
-            do {
-                try manager.removeItem(at: url)
-                return nil
-            } catch {
-                guard lstat(path, &info) == 0 else { return nil }
-                Self.restore(changes)
-                return Self.describe(error, path: path)
-            }
+            return .failed(Self.describe(error, path: path))
         }
     }
 
@@ -96,38 +124,26 @@ struct Cleaner {
         }
         return "\(name): \(nsError.localizedDescription)"
     }
+}
 
-    private struct PermissionChange {
-        let path: String
-        let originalMode: mode_t
-    }
+enum RemovalResult {
+    case removed
+    case trashed(String)
+    case failed(String)
+}
 
-    private static func grantOwnerAccess(to path: String) -> [PermissionChange] {
-        var changes: [PermissionChange] = []
-        guard addOwnerAccess(to: path, recordingIn: &changes),
-              let enumerator = FileManager.default.enumerator(atPath: path) else { return changes }
-        for case let relative as String in enumerator {
-            addOwnerAccess(to: path + "/" + relative, recordingIn: &changes)
-        }
-        return changes
-    }
+struct ItemCleanResult: Sendable {
+    let outcome: CleanOutcome
+    var trashedPaths: [String] = []
+}
 
-    @discardableResult
-    private static func addOwnerAccess(to path: String, recordingIn changes: inout [PermissionChange]) -> Bool {
-        var info = stat()
-        guard lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR else { return false }
-        let permissions = info.st_mode & 0o7777
-        let ownerAccess = permissions | S_IRWXU
-        guard ownerAccess != permissions else { return true }
-        guard fchmodat(AT_FDCWD, path, ownerAccess, AT_SYMLINK_NOFOLLOW) == 0 else { return true }
-        changes.append(PermissionChange(path: path, originalMode: permissions))
-        return true
-    }
-
-    private static func restore(_ changes: [PermissionChange]) {
-        for change in changes.reversed() {
-            fchmodat(AT_FDCWD, change.path, change.originalMode, AT_SYMLINK_NOFOLLOW)
-        }
+enum TrashLocation {
+    static func contains(_ path: String) -> Bool {
+        let normalized = (path as NSString).standardizingPath
+        let userTrash = ScanPipeline.realHomeDirectory() + "/.Trash/"
+        if normalized.hasPrefix(userTrash) { return true }
+        let components = normalized.split(separator: "/")
+        return components.count >= 4 && components[0] == "Volumes" && components[2] == ".Trashes"
     }
 }
 
@@ -162,6 +178,7 @@ final class CleanTally: @unchecked Sendable {
     private var bytesFreed: Int64 = 0
     private var cleaned: Set<String> = []
     private var failures: [CleanFailure] = []
+    private var trashedPaths: [String] = []
 
     init(total: Int) { self.total = total }
 
@@ -171,11 +188,12 @@ final class CleanTally: @unchecked Sendable {
         return CleanProgress(completed: completed, total: total, bytesFreed: bytesFreed, currentTitle: currentTitle)
     }
 
-    func record(_ item: CleanupItem, outcome: CleanOutcome) -> CleanProgress {
+    func record(_ item: CleanupItem, result: ItemCleanResult) -> CleanProgress {
         lock.lock()
         defer { lock.unlock() }
         completed += 1
-        switch outcome {
+        trashedPaths += result.trashedPaths
+        switch result.outcome {
         case .success:
             bytesFreed += item.size
             cleaned.insert(item.id)
@@ -191,6 +209,6 @@ final class CleanTally: @unchecked Sendable {
     func report(movedToTrash: Bool) -> CleanReport {
         lock.lock()
         defer { lock.unlock() }
-        return CleanReport(bytesFreed: bytesFreed, cleanedItemIDs: cleaned, failures: failures, movedToTrash: movedToTrash)
+        return CleanReport(bytesFreed: bytesFreed, cleanedItemIDs: cleaned, failures: failures, movedToTrash: movedToTrash, trashedPaths: trashedPaths)
     }
 }

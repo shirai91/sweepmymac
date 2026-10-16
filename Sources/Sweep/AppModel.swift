@@ -118,12 +118,14 @@ struct CleanOutcome {
     let cleanedItemIDs: Set<String>
     let failures: [CleanFailureEntry]
     let movedToTrash: Bool
+    let trashedPaths: [String]
 
-    init(bytesFreed: Int64, cleanedItemIDs: Set<String>, failures: [CleanFailureEntry], movedToTrash: Bool) {
+    init(bytesFreed: Int64, cleanedItemIDs: Set<String>, failures: [CleanFailureEntry], movedToTrash: Bool, trashedPaths: [String] = []) {
         self.bytesFreed = bytesFreed
         self.cleanedItemIDs = cleanedItemIDs
         self.failures = failures
         self.movedToTrash = movedToTrash
+        self.trashedPaths = trashedPaths
     }
 
     init(report: CleanReport) {
@@ -131,6 +133,7 @@ struct CleanOutcome {
         cleanedItemIDs = report.cleanedItemIDs
         failures = report.failures.map { CleanFailureEntry(id: $0.id, title: $0.title, reason: $0.reason) }
         movedToTrash = report.movedToTrash
+        trashedPaths = report.trashedPaths
     }
 }
 
@@ -174,6 +177,7 @@ final class AppModel {
     private(set) var outcome: CleanOutcome?
     var isConfirmingClean = false
     private(set) var isRefreshingDocker = false
+    private(set) var backgroundDeletion = SweepEngine.backgroundDeletion.status
     var explorerNodeID: Int32 = 0
 
     @ObservationIgnored private let engine = SweepEngine()
@@ -181,14 +185,37 @@ final class AppModel {
     @ObservationIgnored private var summaryIndex: [JunkCategory: Int] = [:]
     @ObservationIgnored private var scanTask: Task<Void, Never>?
     @ObservationIgnored private var scanWasCancelled = false
+    @ObservationIgnored private var backgroundDeletionWatcher: Task<Void, Never>?
 
     private static let ignoredKeysStorageKey = "ignoredPaths"
 
     init() {
         ignoredKeys = UserDefaults.standard.stringArray(forKey: Self.ignoredKeysStorageKey) ?? []
+        watchBackgroundDeletion()
+        SweepEngine.resumePendingDeletions()
     }
 
-    var volume: VolumeInfo { results?.volume ?? startupVolume }
+    var volume: VolumeInfo {
+        guard let scanned = results?.volume, scanned.name != startupVolume.name else { return startupVolume }
+        return scanned
+    }
+
+    private func watchBackgroundDeletion() {
+        backgroundDeletionWatcher = Task { [weak self] in
+            for await status in SweepEngine.backgroundDeletion.statusUpdates() {
+                guard let self else { return }
+                self.backgroundDeletion = status
+                self.startupVolume = VolumeInfo.forPath("/")
+            }
+        }
+    }
+
+    func deleteTrashedItems(_ paths: [String]) async -> DeletionResult {
+        #if DEBUG
+        if DemoMode.isEnabled { return DeletionResult(failedEntries: 0, firstError: nil) }
+        #endif
+        return await engine.emptyTrash(paths)
+    }
     var hasResults: Bool { results != nil }
     var canStartScan: Bool { phase != .scanning && phase != .cleaning }
     var canClean: Bool { (phase == .results || phase == .done) && !selection.isEmpty }

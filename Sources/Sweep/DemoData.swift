@@ -180,7 +180,8 @@ enum DemoData {
         }
         progress(CleanTick(completed: items.count, total: items.count, bytesFreed: freed, currentTitle: "Done"))
         try? await Task.sleep(for: .milliseconds(300))
-        return CleanOutcome(bytesFreed: freed, cleanedItemIDs: cleaned, failures: failures, movedToTrash: mode == .moveToTrash)
+        let trashed = mode == .moveToTrash ? items.compactMap(\.path).map { NSHomeDirectory() + "/.Trash/" + ($0 as NSString).lastPathComponent } : []
+        return CleanOutcome(bytesFreed: freed, cleanedItemIDs: cleaned, failures: failures, movedToTrash: mode == .moveToTrash, trashedPaths: trashed)
     }
 
     private static let home = NSHomeDirectory()
