@@ -76,12 +76,14 @@ struct Cleaner {
             return nil
         } catch {
             guard permanently else { return Self.describe(error, path: path) }
-            Self.makeWritable(path)
+            let changes = Self.grantOwnerAccess(to: path)
             do {
                 try manager.removeItem(at: url)
                 return nil
             } catch {
-                return lstat(path, &info) == 0 ? Self.describe(error, path: path) : nil
+                guard lstat(path, &info) == 0 else { return nil }
+                Self.restore(changes)
+                return Self.describe(error, path: path)
             }
         }
     }
@@ -95,14 +97,36 @@ struct Cleaner {
         return "\(name): \(nsError.localizedDescription)"
     }
 
-    private static func makeWritable(_ path: String) {
-        chmod(path, 0o755)
-        guard let enumerator = FileManager.default.enumerator(atPath: path) else { return }
+    private struct PermissionChange {
+        let path: String
+        let originalMode: mode_t
+    }
+
+    private static func grantOwnerAccess(to path: String) -> [PermissionChange] {
+        var changes: [PermissionChange] = []
+        guard addOwnerAccess(to: path, recordingIn: &changes),
+              let enumerator = FileManager.default.enumerator(atPath: path) else { return changes }
         for case let relative as String in enumerator {
-            let full = path + "/" + relative
-            var info = stat()
-            guard lstat(full, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR else { continue }
-            chmod(full, mode_t(info.st_mode | S_IWUSR | S_IXUSR | S_IRUSR))
+            addOwnerAccess(to: path + "/" + relative, recordingIn: &changes)
+        }
+        return changes
+    }
+
+    @discardableResult
+    private static func addOwnerAccess(to path: String, recordingIn changes: inout [PermissionChange]) -> Bool {
+        var info = stat()
+        guard lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR else { return false }
+        let permissions = info.st_mode & 0o7777
+        let ownerAccess = permissions | S_IRWXU
+        guard ownerAccess != permissions else { return true }
+        guard fchmodat(AT_FDCWD, path, ownerAccess, AT_SYMLINK_NOFOLLOW) == 0 else { return true }
+        changes.append(PermissionChange(path: path, originalMode: permissions))
+        return true
+    }
+
+    private static func restore(_ changes: [PermissionChange]) {
+        for change in changes.reversed() {
+            fchmodat(AT_FDCWD, change.path, change.originalMode, AT_SYMLINK_NOFOLLOW)
         }
     }
 }

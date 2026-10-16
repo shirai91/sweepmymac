@@ -189,6 +189,22 @@ final class ScannerTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: root + "/gomod/pkg/mod"))
     }
 
+    func testCleanerDoesNotChangePermissionsThroughSymlinks() async throws {
+        try write("outside/keep.txt", bytes: 10)
+        chmod(root + "/outside", 0o555)
+        defer { chmod(root + "/outside", 0o755) }
+        try write("cache/locked/file.bin", bytes: 10)
+        try FileManager.default.createSymbolicLink(atPath: root + "/cache/locked/link", withDestinationPath: root + "/outside")
+        chmod(root + "/cache/locked", 0o555)
+        let item = CleanupItem(id: "c", category: .appCaches, title: "c", detail: "", path: root + "/cache", size: 10, safety: .safe, recommended: true, action: .removePaths([root + "/cache"]))
+        let report = await Cleaner(mode: .deletePermanently).clean([item]) { _ in }
+        XCTAssertTrue(report.failures.isEmpty, "\(report.failures.map(\.reason))")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root + "/cache"))
+        let outside = try FileManager.default.attributesOfItem(atPath: root + "/outside")
+        XCTAssertEqual((outside[.posixPermissions] as? NSNumber)?.intValue, 0o555)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root + "/outside/keep.txt"))
+    }
+
     func testPathGuardBlocksImportantFolders() {
         let home = ScanPipeline.realHomeDirectory()
         XCTAssertTrue(PathGuard.isProtected("/"))
