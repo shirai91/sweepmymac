@@ -69,6 +69,34 @@ final class DeletionTests: XCTestCase {
         chmod(directory, 0o755)
     }
 
+    func testFastDeleterReportsFreedBytes() throws {
+        try makeTree(at: "sized", folders: 10, filesPerFolder: 10)
+        let expected = ItemSize.allocatedBytes(under: root + "/sized")
+        let freed = FreedCounter()
+        let result = FastDeleter().delete(root + "/sized") { freed.add($0) }
+        XCTAssertTrue(result.succeeded, result.firstError ?? "")
+        XCTAssertGreaterThan(expected, 0)
+        XCTAssertEqual(freed.total, expected)
+    }
+
+    func testPermanentCleanFinishesDeletingBeforeItReturns() async throws {
+        try makeTree(at: "build", folders: 100, filesPerFolder: 20)
+        let size = ItemSize.allocatedBytes(under: root + "/build")
+        let item = CleanupItem(id: "b", category: .appCaches, title: "build", detail: "", path: root + "/build", size: size, safety: .safe, recommended: true, action: .removePaths([root + "/build"]))
+        var cleaner = Cleaner(mode: .deletePermanently)
+        cleaner.backgroundDeleter = BackgroundDeleter(stagingRoot: root + "/.staging")
+        let updates = ProgressLog()
+        let report = await cleaner.clean([item]) { updates.append($0) }
+        XCTAssertEqual(report.cleanedItemIDs, ["b"])
+        XCTAssertEqual(report.bytesFreed, size)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root + "/build"))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root + "/.staging"), [])
+        XCTAssertTrue(cleaner.backgroundDeleter.status.isIdle)
+        let processed = updates.all.map(\.bytesProcessed)
+        XCTAssertEqual(processed, processed.sorted())
+        XCTAssertEqual(processed.last, size)
+    }
+
     func testStagingMakesItemDisappearAtOnceAndDeletesInBackground() async throws {
         try makeTree(at: "big", folders: 50, filesPerFolder: 20)
         let deleter = BackgroundDeleter(stagingRoot: root + "/.staging")
@@ -137,5 +165,53 @@ final class DeletionTests: XCTestCase {
         XCTAssertTrue(cleaner.emptyTrash(report.trashedPaths).succeeded)
         await staging.waitUntilIdle()
         XCTAssertFalse(FileManager.default.fileExists(atPath: trashed))
+    }
+}
+
+private final class FreedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var bytes: Int64 = 0
+
+    var total: Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return bytes
+    }
+
+    func add(_ value: Int64) {
+        lock.lock()
+        bytes += value
+        lock.unlock()
+    }
+}
+
+private final class ProgressLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var updates: [CleanProgress] = []
+
+    var all: [CleanProgress] {
+        lock.lock()
+        defer { lock.unlock() }
+        return updates
+    }
+
+    func append(_ update: CleanProgress) {
+        lock.lock()
+        updates.append(update)
+        lock.unlock()
+    }
+}
+
+private enum ItemSize {
+    static func allocatedBytes(under path: String) -> Int64 {
+        guard let walker = FileManager.default.enumerator(atPath: path) else { return 0 }
+        var total: Int64 = 0
+        for case let relative as String in walker {
+            var info = stat()
+            if lstat(path + "/" + relative, &info) == 0, (info.st_mode & S_IFMT) != S_IFDIR {
+                total += Int64(info.st_blocks) * 512
+            }
+        }
+        return total
     }
 }

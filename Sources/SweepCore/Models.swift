@@ -234,6 +234,7 @@ public struct CleanProgress: Sendable {
     public let completed: Int
     public let total: Int
     public let bytesFreed: Int64
+    public let bytesProcessed: Int64
     public let currentTitle: String
 }
 

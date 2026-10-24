@@ -15,7 +15,9 @@ struct Cleaner {
             func scheduleNext() -> Bool {
                 guard let item = iterator.next() else { return false }
                 group.addTask {
-                    let result = await perform(item)
+                    let result = await perform(item) { bytes in
+                        if let update = tally.advance(item, by: bytes) { progress(update) }
+                    }
                     progress(tally.record(item, result: result))
                 }
                 return true
@@ -28,12 +30,12 @@ struct Cleaner {
         return tally.report(movedToTrash: mode == .moveToTrash)
     }
 
-    func perform(_ item: CleanupItem) async -> ItemCleanResult {
+    func perform(_ item: CleanupItem, onFreed: @escaping FreedBytesHandler = { _ in }) async -> ItemCleanResult {
         switch item.action {
         case .removePaths(let paths):
-            return removeAll(paths, totalBytes: item.size, permanently: mode == .deletePermanently)
+            return removeAll(paths, totalBytes: item.size, permanently: mode == .deletePermanently, onFreed: onFreed)
         case .emptyTrash(let paths):
-            return removeAll(paths, totalBytes: item.size, permanently: true)
+            return removeAll(paths, totalBytes: item.size, permanently: true, onFreed: onFreed)
         case .docker(let action):
             do {
                 try await docker.perform(action)
@@ -58,7 +60,7 @@ struct Cleaner {
                 firstError = firstError ?? "\((path as NSString).lastPathComponent) is not in the Trash"
                 continue
             }
-            if case .failed(let reason) = deletePermanently(path, bytes: 0) {
+            if case .failed(let reason) = deleteInBackground(path) {
                 failures += 1
                 firstError = firstError ?? reason
             }
@@ -66,16 +68,17 @@ struct Cleaner {
         return DeletionResult(failedEntries: failures, firstError: firstError)
     }
 
-    private func removeAll(_ paths: [String], totalBytes: Int64, permanently: Bool) -> ItemCleanResult {
+    private func removeAll(_ paths: [String], totalBytes: Int64, permanently: Bool, onFreed: @escaping FreedBytesHandler) -> ItemCleanResult {
         let bytesPerPath = paths.isEmpty ? 0 : totalBytes / Int64(paths.count)
         var reasons: [String] = []
         var failedCount = 0
         var trashedPaths: [String] = []
         for path in paths {
-            switch remove(path, bytes: bytesPerPath, permanently: permanently) {
+            switch remove(path, permanently: permanently, onFreed: onFreed) {
             case .removed:
                 continue
             case .trashed(let location):
+                onFreed(bytesPerPath)
                 trashedPaths.append(location)
             case .failed(let reason):
                 failedCount += 1
@@ -91,19 +94,27 @@ struct Cleaner {
         return ItemCleanResult(outcome: .partial("\(failedCount) of \(paths.count) could not be removed. " + summary, fractionRemoved: removedFraction), trashedPaths: trashedPaths)
     }
 
-    private func remove(_ path: String, bytes: Int64, permanently: Bool) -> RemovalResult {
+    private func remove(_ path: String, permanently: Bool, onFreed: @escaping FreedBytesHandler) -> RemovalResult {
         guard !PathGuard.isProtected(path) else { return .failed("Sweep never removes \(path)") }
         var info = stat()
         guard lstat(path, &info) == 0 else {
             return errno == ENOENT ? .removed : .failed(FastDeleter.describe(errno, path))
         }
-        return permanently ? deletePermanently(path, bytes: bytes) : moveToTrash(path)
+        return permanently ? deleteNow(path, onFreed: onFreed) : moveToTrash(path)
     }
 
-    private func deletePermanently(_ path: String, bytes: Int64) -> RemovalResult {
-        if backgroundDeleter.stage(path, bytes: bytes) == .staged { return .removed }
-        let result = fastDeleter.delete(path)
-        return result.succeeded ? .removed : .failed(result.firstError ?? "\((path as NSString).lastPathComponent) could not be removed")
+    private func deleteNow(_ path: String, onFreed: @escaping FreedBytesHandler) -> RemovalResult {
+        let target = backgroundDeleter.moveIntoStaging(path) ?? path
+        return removalResult(of: fastDeleter.delete(target, onFreed: onFreed), path: path)
+    }
+
+    private func deleteInBackground(_ path: String) -> RemovalResult {
+        if backgroundDeleter.stage(path, bytes: 0) == .staged { return .removed }
+        return removalResult(of: fastDeleter.delete(path), path: path)
+    }
+
+    private func removalResult(of deletion: DeletionResult, path: String) -> RemovalResult {
+        deletion.succeeded ? .removed : .failed(deletion.firstError ?? "\((path as NSString).lastPathComponent) could not be removed")
     }
 
     private func moveToTrash(_ path: String) -> RemovalResult {
@@ -172,10 +183,15 @@ enum PathGuard {
 }
 
 final class CleanTally: @unchecked Sendable {
+    private static let minimumUpdateInterval: UInt64 = 50_000_000
+
     private let lock = NSLock()
     private let total: Int
     private var completed = 0
     private var bytesFreed: Int64 = 0
+    private var bytesProcessed: Int64 = 0
+    private var freedByItemInFlight: [String: Int64] = [:]
+    private var lastUpdate: UInt64 = 0
     private var cleaned: Set<String> = []
     private var failures: [CleanFailure] = []
     private var trashedPaths: [String] = []
@@ -185,7 +201,22 @@ final class CleanTally: @unchecked Sendable {
     func snapshot(currentTitle: String) -> CleanProgress {
         lock.lock()
         defer { lock.unlock() }
-        return CleanProgress(completed: completed, total: total, bytesFreed: bytesFreed, currentTitle: currentTitle)
+        return progress(currentTitle: currentTitle)
+    }
+
+    func advance(_ item: CleanupItem, by bytes: Int64) -> CleanProgress? {
+        lock.lock()
+        defer { lock.unlock() }
+        let alreadyFreed = freedByItemInFlight[item.id, default: 0]
+        let added = min(bytes, item.size - alreadyFreed)
+        guard added > 0 else { return nil }
+        freedByItemInFlight[item.id] = alreadyFreed + added
+        bytesFreed += added
+        bytesProcessed += added
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now - lastUpdate >= Self.minimumUpdateInterval else { return nil }
+        lastUpdate = now
+        return progress(currentTitle: item.title)
     }
 
     func record(_ item: CleanupItem, result: ItemCleanResult) -> CleanProgress {
@@ -193,22 +224,29 @@ final class CleanTally: @unchecked Sendable {
         defer { lock.unlock() }
         completed += 1
         trashedPaths += result.trashedPaths
+        let alreadyFreed = freedByItemInFlight.removeValue(forKey: item.id) ?? 0
+        bytesProcessed += item.size - alreadyFreed
         switch result.outcome {
         case .success:
-            bytesFreed += item.size
+            bytesFreed += item.size - alreadyFreed
             cleaned.insert(item.id)
         case .partial(let reason, let fraction):
-            bytesFreed += Int64(Double(item.size) * fraction)
+            bytesFreed += max(0, Int64(Double(item.size) * fraction) - alreadyFreed)
             failures.append(CleanFailure(id: item.id, title: item.title, reason: reason))
         case .failure(let reason):
             failures.append(CleanFailure(id: item.id, title: item.title, reason: reason))
         }
-        return CleanProgress(completed: completed, total: total, bytesFreed: bytesFreed, currentTitle: item.title)
+        lastUpdate = DispatchTime.now().uptimeNanoseconds
+        return progress(currentTitle: item.title)
     }
 
     func report(movedToTrash: Bool) -> CleanReport {
         lock.lock()
         defer { lock.unlock() }
         return CleanReport(bytesFreed: bytesFreed, cleanedItemIDs: cleaned, failures: failures, movedToTrash: movedToTrash, trashedPaths: trashedPaths)
+    }
+
+    private func progress(currentTitle: String) -> CleanProgress {
+        CleanProgress(completed: completed, total: total, bytesFreed: bytesFreed, bytesProcessed: bytesProcessed, currentTitle: currentTitle)
     }
 }

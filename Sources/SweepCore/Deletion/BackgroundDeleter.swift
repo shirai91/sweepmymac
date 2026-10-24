@@ -83,12 +83,16 @@ public final class BackgroundDeleter: @unchecked Sendable {
     }
 
     func stage(_ path: String, bytes: Int64) -> StagingOutcome {
-        guard prepareStagingRoot(), isOnStagingVolume(path) else { return .unavailable }
-        let name = UUID().uuidString + "-" + (path as NSString).lastPathComponent
-        let destination = stagingRoot + "/" + name
-        guard rename(path, destination) == 0 else { return .unavailable }
+        guard let destination = moveIntoStaging(path) else { return .unavailable }
         enqueue([Job(path: destination, bytes: bytes)])
         return .staged
+    }
+
+    func moveIntoStaging(_ path: String) -> String? {
+        guard prepareStagingRoot(), isOnStagingVolume(path) else { return nil }
+        let name = UUID().uuidString + "-" + (path as NSString).lastPathComponent
+        let destination = stagingRoot + "/" + name
+        return rename(path, destination) == 0 ? destination : nil
     }
 
     private func prepareStagingRoot() -> Bool {

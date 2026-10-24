@@ -165,11 +165,12 @@ enum DemoData {
     static func simulateClean(_ items: [CleanupItem], mode: DeleteMode, progress: @escaping @Sendable (CleanTick) -> Void) async -> CleanOutcome {
         let stepDelay: Duration = DemoMode.route == "cleaning" ? .seconds(30) : .milliseconds(max(20, 2400 / max(items.count, 1)))
         var freed: Int64 = 0
+        var processed: Int64 = 0
         var cleaned: Set<String> = []
         var failures: [CleanFailureEntry] = []
         let failingID = items.first { $0.path?.hasPrefix("/Library") ?? false }?.id
         for (index, item) in items.enumerated() {
-            progress(CleanTick(completed: index, total: items.count, bytesFreed: freed, currentTitle: item.title))
+            progress(CleanTick(completed: index, total: items.count, bytesFreed: freed, bytesProcessed: processed, currentTitle: item.title))
             try? await Task.sleep(for: stepDelay)
             if item.id == failingID {
                 failures.append(CleanFailureEntry(id: item.id, title: item.title, reason: "Permission denied. Sweep needs administrator rights to remove files in /Library."))
@@ -177,8 +178,9 @@ enum DemoData {
                 freed += item.size
                 cleaned.insert(item.id)
             }
+            processed += item.size
         }
-        progress(CleanTick(completed: items.count, total: items.count, bytesFreed: freed, currentTitle: "Done"))
+        progress(CleanTick(completed: items.count, total: items.count, bytesFreed: freed, bytesProcessed: processed, currentTitle: "Done"))
         try? await Task.sleep(for: .milliseconds(300))
         let trashed = mode == .moveToTrash ? items.compactMap(\.path).map { NSHomeDirectory() + "/.Trash/" + ($0 as NSString).lastPathComponent } : []
         return CleanOutcome(bytesFreed: freed, cleanedItemIDs: cleaned, failures: failures, movedToTrash: mode == .moveToTrash, trashedPaths: trashed)

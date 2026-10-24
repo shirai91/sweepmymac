@@ -141,6 +141,7 @@ struct CleanTick: Sendable {
     let completed: Int
     let total: Int
     let bytesFreed: Int64
+    let bytesProcessed: Int64
     let currentTitle: String
 }
 
@@ -148,10 +149,14 @@ struct LiveCleanProgress {
     var completed: Int
     var total: Int
     var bytesFreed: Int64
+    var bytesProcessed: Int64 = 0
     var targetBytes: Int64
     var currentTitle: String
 
-    var fraction: Double { total == 0 ? 0 : Double(completed) / Double(total) }
+    var fraction: Double {
+        if targetBytes > 0 { return min(1, Double(bytesProcessed) / Double(targetBytes)) }
+        return total == 0 ? 0 : Double(completed) / Double(total)
+    }
 }
 
 @Observable
@@ -434,7 +439,7 @@ final class AppModel {
         }
         #endif
         let report = await engine.clean(items, mode: mode) { update in
-            reportProgress(CleanTick(completed: update.completed, total: update.total, bytesFreed: update.bytesFreed, currentTitle: update.currentTitle))
+            reportProgress(CleanTick(completed: update.completed, total: update.total, bytesFreed: update.bytesFreed, bytesProcessed: update.bytesProcessed, currentTitle: update.currentTitle))
         }
         return CleanOutcome(report: report)
     }
@@ -444,6 +449,7 @@ final class AppModel {
         cleanProgress.completed = update.completed
         cleanProgress.total = update.total
         cleanProgress.bytesFreed = update.bytesFreed
+        cleanProgress.bytesProcessed = update.bytesProcessed
         cleanProgress.currentTitle = update.currentTitle
     }
 

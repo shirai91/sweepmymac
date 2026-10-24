@@ -14,6 +14,8 @@ public struct DeletionResult: Sendable, Equatable {
     static let success = DeletionResult(failedEntries: 0, firstError: nil)
 }
 
+public typealias FreedBytesHandler = @Sendable (Int64) -> Void
+
 public struct FastDeleter: Sendable {
     public var threadCount: Int
 
@@ -21,7 +23,7 @@ public struct FastDeleter: Sendable {
         self.threadCount = max(1, threadCount)
     }
 
-    public func delete(_ path: String) -> DeletionResult {
+    public func delete(_ path: String, onFreed: FreedBytesHandler? = nil) -> DeletionResult {
         var info = stat()
         guard lstat(path, &info) == 0 else {
             return errno == ENOENT ? .success : DeletionResult(failedEntries: 1, firstError: Self.describe(errno, path))
@@ -30,9 +32,10 @@ public struct FastDeleter: Sendable {
             guard unlink(path) == 0 || errno == ENOENT else {
                 return DeletionResult(failedEntries: 1, firstError: Self.describe(errno, path))
             }
+            onFreed?(Int64(info.st_blocks) * 512)
             return .success
         }
-        let run = TreeDeletion(root: path)
+        let run = TreeDeletion(root: path, onFreed: onFreed)
         run.removeFiles(threads: threadCount)
         run.removeDirectories()
         run.restorePermissionsOfSurvivors()
@@ -56,6 +59,7 @@ private final class TreeDeletion: @unchecked Sendable {
     }
 
     private let condition = NSCondition()
+    private let onFreed: FreedBytesHandler?
     private var pending: [Directory]
     private var directories: [Directory]
     private var activeWorkers = 0
@@ -63,7 +67,8 @@ private final class TreeDeletion: @unchecked Sendable {
     private var firstError: String?
     private var permissionChanges: [PermissionChange] = []
 
-    init(root: String) {
+    init(root: String, onFreed: FreedBytesHandler?) {
+        self.onFreed = onFreed
         let rootDirectory = Directory(path: root, depth: 0)
         pending = [rootDirectory]
         directories = [rootDirectory]
@@ -145,8 +150,13 @@ private final class TreeDeletion: @unchecked Sendable {
             }
         }
         var grantedWriteAccess = false
+        var freedBytes: Int64 = 0
         for name in files {
-            if unlinkat(fd, name, 0) == 0 || errno == ENOENT { continue }
+            let bytes = allocatedBytes(of: name, in: fd)
+            if unlinkat(fd, name, 0) == 0 || errno == ENOENT {
+                freedBytes += bytes
+                continue
+            }
             let code = errno
             guard (code == EACCES || code == EPERM), !grantedWriteAccess else {
                 recordFailure(code, directory.path + "/" + name)
@@ -154,14 +164,24 @@ private final class TreeDeletion: @unchecked Sendable {
             }
             grantedWriteAccess = true
             grantOwnerAccess(descriptor: fd, path: directory.path)
-            if unlinkat(fd, name, 0) != 0, errno != ENOENT {
+            if unlinkat(fd, name, 0) == 0 || errno == ENOENT {
+                freedBytes += bytes
+            } else {
                 recordFailure(errno, directory.path + "/" + name)
             }
         }
+        if freedBytes > 0 { onFreed?(freedBytes) }
         if !subdirectories.isEmpty {
             grantOwnerAccess(descriptor: fd, path: directory.path)
         }
         return subdirectories
+    }
+
+    private func allocatedBytes(of name: String, in fd: Int32) -> Int64 {
+        guard onFreed != nil else { return 0 }
+        var info = stat()
+        guard fstatat(fd, name, &info, AT_SYMLINK_NOFOLLOW) == 0 else { return 0 }
+        return Int64(info.st_blocks) * 512
     }
 
     private func openGrantingAccess(_ path: String) -> Int32? {
