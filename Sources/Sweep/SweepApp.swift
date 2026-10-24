@@ -6,21 +6,24 @@ import SwiftUI
 struct SweepApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model = AppModel()
+    @State private var updater = UpdateController()
 
     var body: some Scene {
         Window("Sweep", id: "main") {
             RootView()
                 .environment(model)
+                .environment(updater)
                 .frame(minWidth: 980, minHeight: 660)
         }
         .defaultSize(width: 1180, height: 780)
         .windowResizability(.contentMinSize)
         .windowStyle(.hiddenTitleBar)
-        .commands { SweepCommands(model: model) }
+        .commands { SweepCommands(model: model, updater: updater) }
 
         Settings {
             SettingsView()
                 .environment(model)
+                .environment(updater)
         }
     }
 }
@@ -41,8 +44,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 struct SweepCommands: Commands {
     let model: AppModel
+    let updater: UpdateController
 
     var body: some Commands {
+        CommandGroup(after: .appInfo) {
+            Button("Check for Updates…", action: updater.checkNow)
+                .disabled(!updater.isEnabled || updater.isBusy)
+        }
         CommandGroup(replacing: .newItem) {
             Button("Scan") { model.startScan() }
                 .keyboardShortcut("r", modifiers: .command)

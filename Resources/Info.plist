@@ -46,5 +46,7 @@
 	<string>Sweep scans this volume to find junk files.</string>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
+	<key>SweepUpdatePublicKey</key>
+	<string>eCh3VLOn3s3G6BeFPjV/4h6O36Yt9OSQEifq29SeUfk=</string>
 </dict>
 </plist>

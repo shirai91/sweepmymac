@@ -9,7 +9,7 @@ struct SettingsView: View {
             IgnoredSettings()
                 .tabItem { Label("Ignored Items", systemImage: "eye.slash") }
         }
-        .frame(width: 540, height: 380)
+        .frame(width: 540, height: 500)
     }
 }
 
@@ -50,6 +50,7 @@ struct GeneralSettings: View {
                     }
                 }
             }
+            UpdateSettings()
         }
         .formStyle(.grouped)
     }

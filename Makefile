@@ -1,4 +1,4 @@
-.PHONY: build test app install run icon dmg clean
+.PHONY: build test app install run icon dmg release clean
 
 build:
 	swift build
@@ -20,6 +20,9 @@ icon:
 
 dmg: app
 	scripts/make-dmg.sh
+
+release:
+	scripts/make-release.sh
 
 clean:
 	rm -rf build .build

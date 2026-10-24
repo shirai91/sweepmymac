@@ -4,6 +4,7 @@ import SwiftUI
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
+    @Environment(UpdateController.self) private var updater
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
@@ -13,6 +14,11 @@ struct RootView: View {
                 .navigationSplitViewColumnWidth(min: 300, ideal: 310, max: 380)
         } detail: {
             DetailContainer()
+                .sheet(isPresented: updatePromptBinding) {
+                    UpdateSheet()
+                        .environment(model)
+                        .environment(updater)
+                }
         }
         .sheet(isPresented: $model.isConfirmingClean) {
             ConfirmCleanSheet()
@@ -21,6 +27,14 @@ struct RootView: View {
             model.refreshFullDiskAccess()
         }
         .task { await runDemoAutopilotIfNeeded() }
+        .task { updater.start() }
+    }
+
+    private var updatePromptBinding: Binding<Bool> {
+        Binding(
+            get: { updater.isPromptRequested && model.phase != .scanning && model.phase != .cleaning && !model.isConfirmingClean },
+            set: { isPresented in if !isPresented { updater.remindLater() } }
+        )
     }
 
     private func runDemoAutopilotIfNeeded() async {
